@@ -4,42 +4,27 @@ import os
 import re
 import boto3
 import argparse
+from pydantic import BaseModel, Field
 
-REGION = None
-DRYRUN = None
-IMAGES_TO_KEEP = None
-IGNORE_TAGS_REGEX = None
+class CleanupConfig(BaseModel):
+    dryrun: bool = Field(default=True, description='Prints the repository to be deleted without deleting them')
+    imagestokeep: int = Field(default=100, description='Number of image tags to keep')
+    region: str = Field(default='us-east-1', description='ECR region')
+    ignoretagsregex: str = Field(default="^$", description='Regex of tag names to ignore')
+    runningimagesfile: str = Field(default='complete.list', description='File containing the list of running images', required=True)
 
+config = CleanupConfig()
 
-def initialize():
-    global REGION
-    global DRYRUN
-    global IMAGES_TO_KEEP
-    global IGNORE_TAGS_REGEX
+parser = argparse.ArgumentParser(description='ECR Cleanup Script')
+parser.add_argument('--runningimagesfile', type=str, required=True, help='File containing the list of running images')
+parser.add_argument('--dryrun', type=bool, default=True, help='Prints the repository to be deleted without deleting them')
 
-    REGION = os.environ.get('REGION', "None")
-    DRYRUN = os.environ.get('DRYRUN', "false").lower()
-    if DRYRUN == "false":
-        DRYRUN = False
-    else:
-        DRYRUN = True
-    IMAGES_TO_KEEP = int(os.environ.get('IMAGES_TO_KEEP', 100))
-    IGNORE_TAGS_REGEX = os.environ.get('IGNORE_TAGS_REGEX', "^$")
-
-def handler(event, context):
-    initialize()
-    if REGION == "None":
-        ec2_client = boto3.client('ec2')
-        available_regions = ec2_client.describe_regions()['Regions']
-        for region in available_regions:
-            discover_delete_images(region['RegionName'])
-    else:
-        discover_delete_images(REGION)
+args = parser.parse_args()
 
 
-def discover_delete_images(regionname):
-    print("Discovering images in " + regionname)
-    ecr_client = boto3.client('ecr', region_name=regionname)
+def discover_delete_images():
+    print("Discovering images in " + config.region)
+    ecr_client = boto3.client('ecr', region_name=config.region)
 
     repositories = []
     describe_repo_paginator = ecr_client.get_paginator('describe_repositories')
@@ -49,7 +34,7 @@ def discover_delete_images(regionname):
 
     # Read the list of running images from the file
     running_containers = []
-    with open(ARGS.runningimagesfile, 'r') as file:
+    with open(config.runningimagesfile, 'r') as file:
         for line in file:
             running_containers.append(line.strip())
 
@@ -90,9 +75,9 @@ def discover_delete_images(regionname):
                             running_sha.append(image['imageDigest'])
 
         print("Number of running images found {}".format(len(running_sha)))
-        ignore_tags_regex = re.compile(IGNORE_TAGS_REGEX)
+        ignore_tags_regex = re.compile(config.ignoretagsregex)
         for image in tagged_images:
-            if tagged_images.index(image) >= IMAGES_TO_KEEP:
+            if tagged_images.index(image) >= config.imagestokeep:
                 for tag in image['imageTags']:
                     if "latest" not in tag and ignore_tags_regex.search(tag) is None:
                         if not running_sha or image['imageDigest'] not in running_sha:
@@ -135,7 +120,7 @@ def delete_images(ecr_client, deletesha, deletetag, repo_id, name):
         i = 0
         for deletesha_chunk in chunks(deletesha, 100):
             i += 1
-            if not DRYRUN:
+            if not config.dryrun:
                 delete_response = ecr_client.batch_delete_image(
                     registryId=repo_id,
                     repositoryName=name,
@@ -154,25 +139,5 @@ def delete_images(ecr_client, deletesha, deletetag, repo_id, name):
             print("- {} - {}".format(ids["imageUrl"], ids["pushedAt"]))
 
 
-# Below is the test harness
 if __name__ == '__main__':
-    REQUEST = {"None": "None"}
-    PARSER = argparse.ArgumentParser(description='Deletes stale ECR images')
-    PARSER.add_argument('--dryrun', help='Prints the repository to be deleted without deleting them', default='true',
-                        action='store', dest='dryrun')
-    PARSER.add_argument('--imagestokeep', help='Number of image tags to keep', default='100', action='store',
-                        dest='imagestokeep')
-    PARSER.add_argument('--region', help='ECR region', default=None, action='store', dest='region')
-    PARSER.add_argument('--ignoretagsregex', help='Regex of tag names to ignore', default="^$", action='store', dest='ignoretagsregex')
-    PARSER.add_argument('--runningimagesfile', help='File containing the list of running images', action='store', dest='runningimagesfile' , required=True)
-
-    ARGS = PARSER.parse_args()
-    if ARGS.region:
-        os.environ["REGION"] = ARGS.region
-    else:
-        os.environ["REGION"] = "None"
-    os.environ["DRYRUN"] = ARGS.dryrun.lower()
-    os.environ["IMAGES_TO_KEEP"] = ARGS.imagestokeep
-    os.environ["IGNORE_TAGS_REGEX"] = ARGS.ignoretagsregex
-
-    handler(REQUEST, None)
+    discover_delete_images()
